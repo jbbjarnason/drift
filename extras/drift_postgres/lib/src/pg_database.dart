@@ -34,7 +34,7 @@ class PgDatabase extends DelegatedDatabase {
   SqlDialect get dialect => SqlDialect.postgres;
 }
 
-class _PgDelegate extends DatabaseDelegate {
+class _PgDelegate extends DatabaseDelegate with _PgQueryDelegate {
   _PgDelegate(
     this._open,
     this.closeUnderlyingWhenClosed,
@@ -48,7 +48,10 @@ class _PgDelegate extends DatabaseDelegate {
   Session? _openedSession;
 
   @override
-  TransactionDelegate get transactionDelegate => const NoTransactionDelegate();
+  Session get _session => _openedSession!;
+
+  @override
+  TransactionDelegate transactionDelegate = const NoTransactionDelegate();
 
   @override
   late DbVersionDelegate versionDelegate;
@@ -70,12 +73,52 @@ class _PgDelegate extends DatabaseDelegate {
       versionDelegate = NoVersionDelegate();
     }
 
+    if (session is Pool) {
+      // Statements sent to a pool may run on different connections, so a
+      // transaction can't be emulated by sending `BEGIN` and `COMMIT` to it.
+      transactionDelegate = _PoolTransactionDelegate(session);
+    }
+
     _openedSession = session;
   }
 
   @override
+  Future<void> close() async {
+    if (closeUnderlyingWhenClosed) {
+      if (_openedSession case final Connection c) {
+        await c.close();
+      }
+    }
+  }
+}
+
+/// Runs drift transactions with [Pool.runTx], so that all statements of a
+/// transaction are sent over the same connection of the pool.
+class _PoolTransactionDelegate extends SupportedTransactionDelegate {
+  final Pool<Object?> _pool;
+
+  _PoolTransactionDelegate(this._pool);
+
+  @override
+  Future<void> startTransaction(Future Function(QueryDelegate) run) {
+    // runTx commits if run completes normally and rolls back if it throws.
+    return _pool.runTx((tx) => run(_PgTransactionDelegate(tx)));
+  }
+}
+
+class _PgTransactionDelegate extends QueryDelegate with _PgQueryDelegate {
+  @override
+  final TxSession _session;
+
+  _PgTransactionDelegate(this._session);
+}
+
+mixin _PgQueryDelegate on QueryDelegate {
+  Session get _session;
+
+  @override
   Future<void> runBatched(BatchedStatements statements) async {
-    final session = _openedSession!;
+    final session = _session;
     final prepared =
         List<Statement?>.filled(statements.statements.length, null);
 
@@ -103,7 +146,7 @@ class _PgDelegate extends DatabaseDelegate {
   }
 
   Future<int> _runWithArgs(String statement, List<Object?> args) async {
-    final session = _openedSession!;
+    final session = _session;
 
     final pgArgs = _BoundArguments.ofDartArgs(args);
     final result = await session.execute(
@@ -120,7 +163,7 @@ class _PgDelegate extends DatabaseDelegate {
 
   @override
   Future<int> runInsert(String statement, List<Object?> args) async {
-    final session = _openedSession!;
+    final session = _session;
     final pgArgs = _BoundArguments.ofDartArgs(args);
     final result = await session.execute(Sql(statement, types: pgArgs.types),
         parameters: pgArgs.parameters);
@@ -134,7 +177,7 @@ class _PgDelegate extends DatabaseDelegate {
 
   @override
   Future<QueryResult> runSelect(String statement, List<Object?> args) async {
-    final session = _openedSession!;
+    final session = _session;
     final pgArgs = _BoundArguments.ofDartArgs(args);
     final result = await session.execute(Sql(statement, types: pgArgs.types),
         parameters: pgArgs.parameters);
@@ -142,15 +185,6 @@ class _PgDelegate extends DatabaseDelegate {
     return QueryResult([
       for (final pgColumn in result.schema.columns) pgColumn.columnName ?? '',
     ], result);
-  }
-
-  @override
-  Future<void> close() async {
-    if (closeUnderlyingWhenClosed) {
-      if (_openedSession case final Connection c) {
-        await c.close();
-      }
-    }
   }
 }
 

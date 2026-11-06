@@ -1,3 +1,9 @@
+## 1.3.2-dev
+
+- Run transactions on a single connection when `PgDatabase.opened` is used with
+  a `Pool`. Previously, `BEGIN`, the statements of the transaction and `COMMIT`
+  could be sent to different connections of the pool.
+
 ## 1.3.1
 
 - Add `toJson()` method to `PgDate` and `PgDateTime`.
